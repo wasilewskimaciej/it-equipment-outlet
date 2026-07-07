@@ -67,12 +67,16 @@ Admin panel (light / dark):
   </tr>
 </table>
 
-User management &nbsp;·&nbsp; email notification:
+User management:
+
+![User management](docs/screenshots/15-admin-users.png)
+
+Email notifications (reservation / cancellation):
 
 <table>
   <tr>
-    <td><img src="docs/screenshots/15-admin-users.png" width="420" alt="User management"></td>
     <td><img src="docs/screenshots/17-email-reservation.png" width="420" alt="Reservation email"></td>
+    <td><img src="docs/screenshots/18-email-cancellation.png" width="420" alt="Cancellation email"></td>
   </tr>
 </table>
 
@@ -139,4 +143,4 @@ Full REST API documentation: [API.md](API.md)
 
 ## License
 
-Released under the [MIT License](LICENSE) © 2025-2026 Maciej Wasilewski.
+Released under the [MIT License](LICENSE) © 2026 Maciej Wasilewski.

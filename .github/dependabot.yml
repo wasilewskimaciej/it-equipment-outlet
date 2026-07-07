@@ -1,15 +1,19 @@
 version: 2
 updates:
-  # npm dependencies — grouped into a single weekly PR to keep noise down.
+  # npm: group minor/patch into one low-noise PR; majors come as separate PRs
+  # so each breaking upgrade can be reviewed and tested on its own.
   - package-ecosystem: "npm"
     directory: "/"
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
     groups:
-      npm-dependencies:
+      npm-minor-patch:
         patterns:
           - "*"
+        update-types:
+          - "minor"
+          - "patch"
 
   # Keep GitHub Actions pinned versions up to date.
   - package-ecosystem: "github-actions"
