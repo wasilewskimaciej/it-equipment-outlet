@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Zarządzanie użytkownikami - IT Equipment Outlet</title>
+  <link rel="stylesheet" href="/css/style.css">
+  <script src="/js/theme.js"></script>
+</head>
+<body>
+  <header class="header">
+    <h1>IT Equipment Outlet - Zarządzanie użytkownikami</h1>
+    <div class="header-right">
+      <button class="theme-toggle" onclick="toggleTheme()" title="Zmień motyw">
+        <span class="icon-sun">&#9728;</span>
+        <span class="icon-moon">&#9790;</span>
+      </button>
+      <span class="user-info" id="userInfo"></span>
+      <a href="/admin.html" class="btn btn-secondary">Panel Admina</a>
+      <form action="/auth/logout" method="POST" class="inline-form">
+        <button type="submit" class="btn btn-secondary">Wyloguj</button>
+      </form>
+    </div>
+  </header>
+
+  <main class="container">
+    <section class="admin-section">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+        <div>
+          <h2 style="margin: 0;">Użytkownicy systemu</h2>
+          <p style="color: #666; margin: 0.5rem 0 0 0;">
+            Administratorzy mają dostęp do panelu zarządzania i mogą dodawać/edytować sprzęt oraz zarządzać rezerwacjami.
+          </p>
+        </div>
+      </div>
+      <div id="usersContainer">
+        <div class="loading">Ładowanie...</div>
+      </div>
+    </section>
+  </main>
+
+  <script src="/js/admin-users.js"></script>
+</body>
+</html>

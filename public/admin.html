@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <title>Panel Admina - IT Equipment Outlet</title>
+  <link rel="stylesheet" href="/css/style.css">
+  <script src="/js/theme.js"></script>
+</head>
+<body>
+  <header class="header">
+    <h1>IT Equipment Outlet - Panel Admina</h1>
+    <div class="header-right">
+      <button class="theme-toggle" onclick="toggleTheme()" title="Zmień motyw">
+        <span class="icon-sun">&#9728;</span>
+        <span class="icon-moon">&#9790;</span>
+      </button>
+      <span class="user-info" id="userInfo"></span>
+      <a href="/" class="btn btn-secondary">Katalog</a>
+      <a href="/admin/users.html" class="btn btn-secondary">Użytkownicy</a>
+      <form action="/auth/logout" method="POST" class="inline-form">
+        <button type="submit" class="btn btn-secondary">Wyloguj</button>
+      </form>
+    </div>
+  </header>
+
+  <main class="container">
+    <!-- Add Item Form -->
+    <section class="admin-section">
+      <h2>Dodaj nowy sprzęt</h2>
+      <form id="addItemForm">
+        <div class="form-row">
+          <div class="form-group">
+            <label for="itemName">Nazwa *</label>
+            <input type="text" id="itemName" required placeholder="np. Dell Monitor 24">
+          </div>
+          <div class="form-group">
+            <label for="itemCategory">Kategoria *</label>
+            <select id="itemCategory" required>
+              <option value="">Wybierz kategorię</option>
+              <option value="phone">Telefon komórkowy</option>
+              <option value="desktop">Komputer stacjonarny</option>
+              <option value="laptop">Laptop</option>
+              <option value="monitor">Monitor</option>
+              <option value="other">Inne</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-group">
+          <label for="itemDescription">Opis</label>
+          <textarea id="itemDescription" placeholder="Stan, specyfikacja, uwagi..."></textarea>
+        </div>
+        <div class="form-group">
+          <label for="itemAdminNote">Notatka wewnętrzna (tylko dla adminów)</label>
+          <textarea id="itemAdminNote" placeholder="Notatka widoczna tylko dla administratorów..." class="admin-note-field"></textarea>
+        </div>
+        <div class="form-group" id="itemQuantityGroup" style="display: none;">
+          <label for="itemQuantity">Ilość dostępnych</label>
+          <input type="number" id="itemQuantity" min="1" value="1" placeholder="np. 10">
+          <p class="hint">Dla pojedynczych przedmiotów zostaw 1. Dla wielu identycznych egzemplarzy (np. telefony, monitory) wpisz liczbę sztuk.</p>
+        </div>
+        <div class="form-group">
+          <div class="form-group-inline">
+            <label class="toggle-switch">
+              <input type="checkbox" id="itemVisible" checked>
+              <span class="toggle-slider"></span>
+            </label>
+            <label for="itemVisible" style="cursor: pointer; user-select: none;">Widoczny dla użytkowników</label>
+          </div>
+          <p class="hint" style="margin-left: 1.5rem; font-size: 0.85rem; color: var(--secondary-text);">
+            Odznacz aby ukryć produkt w katalogu (możesz opublikować później)
+          </p>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label for="itemPrice">Cena (zł)</label>
+            <input type="number" id="itemPrice" step="0.01" min="0" placeholder="np. 150.00">
+          </div>
+          <div class="form-group">
+            <label for="itemImages">Zdjęcia (max 10)</label>
+            <input type="file" id="itemImages" accept="image/*" multiple>
+          </div>
+        </div>
+        <button type="submit" class="btn btn-success">Dodaj sprzęt</button>
+      </form>
+      <div id="addItemMessage"></div>
+    </section>
+
+    <!-- Reservations -->
+    <section class="admin-section">
+      <div class="section-header">
+        <h2>Aktywne rezerwacje</h2>
+        <div class="export-controls">
+          <label for="exportSort" class="filter-label">Sortuj:</label>
+          <select id="exportSort" class="filter-select">
+            <option value="date-desc">📅 Najnowsze</option>
+            <option value="date-asc">📅 Najstarsze</option>
+            <option value="user-asc">👤 Użytkownik A-Z</option>
+            <option value="user-desc">👤 Użytkownik Z-A</option>
+            <option value="item-asc">📦 Przedmiot A-Z</option>
+            <option value="category-asc">🏷️ Kategoria</option>
+          </select>
+          <button onclick="exportReservations()" class="btn btn-secondary btn-export" title="Eksportuj aktywne rezerwacje do Excel">
+            📥 Excel
+          </button>
+          <button onclick="openAdminOrderModal()" class="btn btn-primary btn-export" title="Utwórz ręczne zamówienie">
+            ➕ Zamówienie ręczne
+          </button>
+        </div>
+      </div>
+      <div id="reservationsContainer">
+        <div class="loading">Ładowanie...</div>
+      </div>
+    </section>
+
+    <!-- Favorites History -->
+    <section class="admin-section">
+      <h2>Historia ulubionych</h2>
+      <div id="favoritesHistoryContainer">
+        <div class="loading">Ładowanie...</div>
+      </div>
+    </section>
+
+    <!-- Inventory Summary -->
+    <section class="admin-section">
+      <h2>Podsumowanie magazynu</h2>
+      <div id="inventorySummaryContainer">
+        <div class="loading">Ładowanie...</div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- All Items (full-width, outside container) -->
+  <div class="full-width-wrapper">
+    <section class="admin-section">
+      <div class="section-header">
+        <h2>Wszystkie przedmioty</h2>
+        <div style="display: flex; gap: 0.5rem;">
+          <button class="btn btn-secondary btn-sm" onclick="exportItemsToCSV(false)" title="Szybki eksport CSV: tylko główne zdjęcie, brak opisu">📥 CSV (szybki)</button>
+          <button class="btn btn-secondary btn-sm" onclick="exportItemsToCSV(true)" title="Pełny eksport CSV: wszystkie zdjęcia + opis">📥 CSV (pełny)</button>
+        </div>
+      </div>
+      <div class="filters" style="margin-bottom: 1rem;">
+        <select id="statusFilter">
+          <option value="" selected>Wszystkie statusy</option>
+          <option value="available">Dostępne</option>
+          <option value="reserved">Zarezerwowane</option>
+          <option value="sold">Sprzedane</option>
+          <option value="hidden">Ukryte</option>
+        </select>
+      </div>
+      <div id="itemsContainer">
+        <div class="loading">Ładowanie...</div>
+      </div>
+    </section>
+  </div>
+
+  <!-- Edit Item Modal -->
+  <div class="modal-overlay" id="editModal">
+    <div class="modal modal-large">
+      <button class="modal-close" onclick="closeEditModal()">&times;</button>
+      <h3>Edytuj przedmiot</h3>
+      <form id="editItemForm">
+        <input type="hidden" id="editItemId">
+        <div class="form-row">
+          <div class="form-group">
+            <label for="editItemName">Nazwa *</label>
+            <input type="text" id="editItemName" required>
+          </div>
+          <div class="form-group">
+            <label for="editItemCategory">Kategoria *</label>
+            <select id="editItemCategory" required>
+              <option value="phone">Telefon komórkowy</option>
+              <option value="desktop">Komputer stacjonarny</option>
+              <option value="laptop">Laptop</option>
+              <option value="monitor">Monitor</option>
+              <option value="other">Inne</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-group">
+          <label for="editItemDescription">Opis</label>
+          <textarea id="editItemDescription"></textarea>
+        </div>
+        <div class="form-group">
+          <label for="editItemAdminNote">Notatka wewnętrzna (tylko dla adminów)</label>
+          <textarea id="editItemAdminNote" placeholder="Notatka widoczna tylko dla administratorów..." class="admin-note-field"></textarea>
+        </div>
+        <div class="form-group" id="editItemQuantityGroup" style="display: none;">
+          <label for="editItemQuantity">Ilość dostępnych</label>
+          <input type="number" id="editItemQuantity" min="0" value="1">
+          <p class="hint">Dla pojedynczych przedmiotów zostaw 1. Dla wielu identycznych egzemplarzy (np. telefony, monitory) wpisz liczbę sztuk.</p>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label for="editItemPrice">Cena (zł)</label>
+            <input type="number" id="editItemPrice" step="0.01" min="0">
+          </div>
+          <div class="form-group">
+            <label for="editItemStatus">Status</label>
+            <select id="editItemStatus">
+              <option value="available">Dostępny</option>
+              <option value="reserved">Zarezerwowany</option>
+              <option value="sold">Sprzedany</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-group">
+          <div class="form-group-inline">
+            <label class="toggle-switch">
+              <input type="checkbox" id="editItemVisible">
+              <span class="toggle-slider"></span>
+            </label>
+            <label for="editItemVisible" style="cursor: pointer; user-select: none;">Widoczny dla użytkowników</label>
+          </div>
+          <p class="hint" style="margin-left: 1.5rem; font-size: 0.85rem; color: var(--secondary-text);">
+            Produkt ukryty nie pojawi się w katalogu użytkowników
+          </p>
+        </div>
+
+        <!-- Image Management Section -->
+        <div class="form-group">
+          <label>Zdjęcia</label>
+          <div class="edit-images-container" id="editImagesContainer">
+            <!-- Images will be rendered here by JS -->
+          </div>
+          <p class="hint">Przeciągnij zdjęcia aby zmienić kolejność. Pierwsze zdjęcie będzie główne.</p>
+        </div>
+
+        <div class="form-group">
+          <label for="editNewImages">Dodaj nowe zdjęcia</label>
+          <input type="file" id="editNewImages" accept="image/*" multiple>
+        </div>
+
+        <div class="modal-actions">
+          <button type="button" class="btn btn-secondary" onclick="closeEditModal()">Anuluj</button>
+          <button type="submit" class="btn btn-primary">Zapisz</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Delete Confirmation Modal -->
+  <div class="modal-overlay" id="deleteModal">
+    <div class="modal">
+      <h3>Potwierdź usunięcie</h3>
+      <p>Czy na pewno chcesz usunąć: <strong id="deleteItemName"></strong>?</p>
+      <div class="modal-actions">
+        <button class="btn btn-secondary" onclick="closeDeleteModal()">Anuluj</button>
+        <button class="btn btn-danger" id="confirmDeleteBtn">Usuń</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Item History Modal -->
+  <div class="modal-overlay" id="historyModal">
+    <div class="modal">
+      <button class="modal-close" onclick="closeHistoryModal()">&times;</button>
+      <h3>Historia produktu: <span id="historyItemName"></span></h3>
+      <div id="itemHistoryContainer" class="item-history-container">
+        <div class="loading-small">Ładowanie historii...</div>
+      </div>
+      <div class="modal-actions">
+        <button class="btn btn-secondary" onclick="closeHistoryModal()">Zamknij</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Admin Note Modal -->
+  <div class="modal-overlay" id="adminNoteModal">
+    <div class="modal">
+      <button class="modal-close" onclick="closeAdminNoteModal()">&times;</button>
+      <h3>Notatka wewnętrzna - <span id="adminNoteItemName"></span></h3>
+      <div class="admin-note-content" id="adminNoteContent"></div>
+      <div class="modal-actions">
+        <button class="btn btn-secondary" onclick="closeAdminNoteModal()">Zamknij</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Reservation Note Modal -->
+  <div class="modal-overlay" id="reservationNoteModal">
+    <div class="modal">
+      <button class="modal-close" onclick="closeReservationNoteModal()">&times;</button>
+      <h3>Notatka do rezerwacji - <span id="reservationNoteItemName"></span></h3>
+      <form id="reservationNoteForm" onsubmit="saveReservationNoteFromModal(event)">
+        <div class="form-group">
+          <label for="reservationNoteTextarea">Status / komentarz:</label>
+          <textarea
+            id="reservationNoteTextarea"
+            rows="4"
+            placeholder="np. przekazałem do księgowości, czekam na odpowiedź od użytkownika, opłacone - musi podejść..."
+            style="width: 100%; padding: 8px; border: 1px solid var(--border-color); border-radius: 4px; background: var(--bg-secondary); color: var(--text-color); font-family: inherit; resize: vertical;"
+          ></textarea>
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="btn btn-secondary" onclick="closeReservationNoteModal()">Anuluj</button>
+          <button type="submit" class="btn btn-primary">Zapisz</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Admin Manual Order Modal -->
+  <div class="modal-overlay" id="adminOrderModal">
+    <div class="modal">
+      <button class="modal-close" onclick="closeAdminOrderModal()">&times;</button>
+      <h3>Zamówienie ręczne (admin)</h3>
+      <form id="adminOrderForm" onsubmit="submitAdminOrder(event)">
+        <div class="form-group">
+          <label for="adminOrderUser">Użytkownik *</label>
+          <select id="adminOrderUser" required style="width: 100%; padding: 8px; border: 1px solid var(--border-color); border-radius: 4px; background: var(--bg-secondary); color: var(--text-color);">
+            <option value="">Wybierz użytkownika...</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label for="adminOrderItem">Przedmiot *</label>
+          <select id="adminOrderItem" required style="width: 100%; padding: 8px; border: 1px solid var(--border-color); border-radius: 4px; background: var(--bg-secondary); color: var(--text-color);">
+            <option value="">Wybierz przedmiot...</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label for="adminOrderQuantity">Ilość</label>
+          <input type="number" id="adminOrderQuantity" min="1" value="1" style="width: 100%; padding: 8px; border: 1px solid var(--border-color); border-radius: 4px; background: var(--bg-secondary); color: var(--text-color);">
+          <p class="hint" id="adminOrderQuantityHint">Dostępne: -</p>
+        </div>
+        <div class="form-group">
+          <label>Rabat</label>
+          <div style="display: flex; gap: 0.5rem;">
+            <select id="adminOrderDiscountType" style="flex: 1; padding: 8px; border: 1px solid var(--border-color); border-radius: 4px; background: var(--bg-secondary); color: var(--text-color);">
+              <option value="">Brak rabatu</option>
+              <option value="percent">Procentowy (%)</option>
+              <option value="fixed">Kwotowy (zł/szt)</option>
+            </select>
+            <input type="number" id="adminOrderDiscountValue" step="0.01" min="0" placeholder="Wartość" style="flex: 1; padding: 8px; border: 1px solid var(--border-color); border-radius: 4px; background: var(--bg-secondary); color: var(--text-color);" disabled>
+          </div>
+        </div>
+        <div class="form-group" id="adminOrderPricePreview" style="display:none;">
+          <label>Podgląd ceny</label>
+          <p id="adminOrderPriceText" style="font-weight: bold; color: var(--accent-color); margin: 0;"></p>
+        </div>
+        <div class="form-group">
+          <label for="adminOrderNote">Notatka admina *</label>
+          <textarea id="adminOrderNote" required rows="3" placeholder="Powód zamówienia ręcznego, np. zamówienie hurtowe, rabat indywidualny..." style="width: 100%; padding: 8px; border: 1px solid var(--border-color); border-radius: 4px; background: var(--bg-secondary); color: var(--text-color); font-family: inherit; resize: vertical;"></textarea>
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="btn btn-secondary" onclick="closeAdminOrderModal()">Anuluj</button>
+          <button type="submit" class="btn btn-primary">Utwórz zamówienie</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <script src="/js/admin.js"></script>
+</body>
+</html>

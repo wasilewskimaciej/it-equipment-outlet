@@ -1,0 +1,5 @@
+# Internal company portal
+# Block all crawlers and bots
+
+User-agent: *
+Disallow: /

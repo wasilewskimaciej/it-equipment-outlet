@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.env
+data/database.db
+data/*.db
+public/images/*
+!public/images/.gitkeep
+*.log
+*.tar
+*.tar.gz
+backup-prod-*/
+logs/
