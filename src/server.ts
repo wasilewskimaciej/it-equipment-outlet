@@ -1,9 +1,10 @@
 import express from 'express';
 import session from 'express-session';
+import createSqliteStore from 'better-sqlite3-session-store';
 import rateLimit from 'express-rate-limit';
 import path from 'path';
 import { config } from './config';
-import { initializeDatabase } from './db';
+import { db, initializeDatabase } from './db';
 import { passport } from './auth';
 import { requireAdmin } from './middleware/auth.middleware';
 import { csrfProtection } from './middleware/csrf.middleware';
@@ -69,9 +70,15 @@ app.use((req, res, next) => {
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Session
+// Session (persisted in SQLite so restarts do not log users out)
+const SqliteStore = createSqliteStore(session);
+
 app.use(
   session({
+    store: new SqliteStore({
+      client: db,
+      expired: { clear: true, intervalMs: 15 * 60 * 1000 }
+    }),
     secret: config.session.secret,
     resave: false,
     saveUninitialized: false,
