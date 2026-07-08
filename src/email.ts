@@ -43,7 +43,7 @@ function formatPolishDateTime(date: Date | string): string {
 export async function sendReservationNotification(reservation: Reservation): Promise<boolean> {
   if (!config.smtp.user || !config.smtp.notificationEmail) {
     console.log('SMTP not configured, skipping email notification');
-    console.log('Reservation:', reservation);
+    console.log('Reservation:', { id: reservation.id, itemId: reservation.itemId });
     return false;
   }
 

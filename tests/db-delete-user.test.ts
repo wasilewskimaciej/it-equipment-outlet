@@ -1,24 +1,26 @@
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 type DbModule = typeof import('../src/db');
 
-const dataDir = path.join(process.cwd(), 'data');
+let tempDir: string;
 
 let dbModule: DbModule;
 
 describe('deleteUser', () => {
   beforeAll(async () => {
     process.env.SESSION_SECRET = 'test-session-secret';
-    fs.rmSync(dataDir, { recursive: true, force: true });
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'it-equipment-test-'));
+    process.env.DATABASE_PATH = path.join(tempDir, 'database.db');
     dbModule = await import('../src/db');
     dbModule.initializeDatabase();
   });
 
   afterAll(() => {
     dbModule.db.close();
-    fs.rmSync(dataDir, { recursive: true, force: true });
+    fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
   it('preserves completed reservation history and sales stats when deleting a buyer', () => {

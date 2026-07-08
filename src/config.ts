@@ -72,7 +72,9 @@ export const config = {
   },
 
   paths: {
-    database: path.join(__dirname, '..', 'data', 'database.db'),
+    database: process.env.DATABASE_PATH
+      ? path.resolve(process.env.DATABASE_PATH)
+      : path.join(__dirname, '..', 'data', 'database.db'),
     uploads: path.join(__dirname, '..', 'public', 'images')
   }
 };
