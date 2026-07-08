@@ -9,6 +9,7 @@ Szczegółowa dokumentacja REST API dla aplikacji IT Equipment Outlet.
 - [Endpointy Auth](#endpointy-auth)
 - [Endpointy Items](#endpointy-items)
 - [Endpointy Reservations](#endpointy-reservations)
+- [Endpointy Favorites](#endpointy-favorites)
 - [Endpointy Users](#endpointy-users)
 - [Kody błędów](#kody-błędów)
 - [Przykłady użycia](#przykłady-użycia)
@@ -20,6 +21,8 @@ Szczegółowa dokumentacja REST API dla aplikacji IT Equipment Outlet.
 ```
 http://localhost:3000
 ```
+
+Powyższy adres to domyślna konfiguracja developerska. Port i publiczny adres aplikacji pochodzą ze zmiennych środowiskowych `PORT` oraz `BASE_URL`.
 
 ### Format odpowiedzi
 
@@ -61,7 +64,7 @@ Wszystkie endpointy zwracają JSON.
 Aplikacja używa session-based auth z cookies.
 
 **Login flow:**
-1. User loguje się przez `/auth/microsoft` lub `/auth/local-login`
+1. User loguje się przez `/auth/microsoft` lub `/auth/local`
 2. Serwer ustawia cookie `connect.sid` (HTTPOnly, Secure w prod)
 3. Przeglądarka automatycznie wysyła cookie z każdym requestem
 4. Middleware `requireAuth` sprawdza sesję
@@ -72,48 +75,109 @@ Name: connect.sid
 Value: s%3A<session-id>.<signature>
 Path: /
 HttpOnly: true
-Secure: true (production)
-Max-Age: 86400 (24h)
+Secure: true (production, gdy BASE_URL zaczyna się od https)
+Max-Age: 604800 (7 dni, rolling)
+SameSite: (celowo nieustawione)
 ```
+
+**Uwagi:**
+- Cookie działa w trybie **rolling** - każdy request odświeża ważność sesji o kolejne 7 dni.
+- Sesje są utrwalane po stronie serwera w SQLite, więc restart serwera nie wylogowuje użytkowników.
+- Atrybut `sameSite` jest celowo nieustawiony - Microsoft OAuth callback to cross-site POST i wymaga wysłania cookie sesji. Ochronę przed CSRF zapewnia parametr `state` OAuth oraz middleware sprawdzający nagłówek Origin (patrz niżej).
 
 ### Middleware
 
-Wszystkie endpointy (poza `/auth/*`) wymagają autentykacji.
+Wszystkie endpointy `/api/*` (i część `/auth/*`) wymagają autentykacji.
 
 ```typescript
 // src/middleware/auth.middleware.ts
 
 // Wymaga zalogowania
 export function requireAuth(req, res, next) {
-  if (!req.isAuthenticated()) {
-    return res.status(401).json({ error: 'Unauthorized' });
+  if (req.isAuthenticated() && req.user) {
+    return next();
   }
-  next();
+  // Dla żądań API - 401
+  if (req.originalUrl.startsWith('/api/')) {
+    return res.status(401).json({ error: 'Not authenticated' });
+  }
+  // Dla żądań stron HTML - redirect do logowania
+  res.redirect('/auth/login');
 }
 
 // Wymaga uprawnień admina
 export function requireAdmin(req, res, next) {
-  if (!req.isAuthenticated() || !req.user.isAdmin) {
-    return res.status(403).json({ error: 'Forbidden' });
+  if (!req.isAuthenticated() || !req.user) {
+    if (req.originalUrl.startsWith('/api/')) {
+      return res.status(401).json({ error: 'Not authenticated' });
+    }
+    return res.redirect('/auth/login');
+  }
+  if (!req.user.isAdmin) {
+    if (req.originalUrl.startsWith('/api/')) {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+    return res.status(403).json({ error: 'Brak uprawnień administratora' });
   }
   next();
 }
+```
+
+### Ochrona CSRF (nagłówek Origin)
+
+Middleware `csrfProtection` (`src/middleware/csrf.middleware.ts`) odrzuca cross-site żądania zmieniające stan:
+
+- Sprawdzane są wszystkie metody poza `GET`, `HEAD` i `OPTIONS`.
+- Sprawdzenie dotyczy tylko żądań z **uwierzytelnioną sesją** - żądania bez sesji (np. logowanie) przechodzą bez kontroli.
+- Ścieżka `/auth/callback` jest wyłączona spod kontroli (cross-site POST z domeny Microsoft).
+- Origin żądania (nagłówek `Origin`, a w razie jego braku origin z nagłówka `Referer`) musi być identyczny z originem `BASE_URL`. Gdy oba nagłówki są nieobecne lub wskazują inny origin, żądanie jest blokowane.
+- Zablokowane żądanie `/api/*` dostaje `403` z body `{"error": "Invalid request origin"}`; pozostałe ścieżki dostają `403` z tekstem `Forbidden`.
+
+Przeglądarki wysyłają nagłówek `Origin` automatycznie przy takich żądaniach, więc frontend nie wymaga żadnych zmian. Natomiast **curl i skrypty muszą dodać nagłówek ręcznie**:
+
+```bash
+curl -X POST http://localhost:3000/api/reservations \
+  -b cookies.txt \
+  -H "Origin: http://localhost:3000" \
+  -H "Content-Type: application/json" \
+  -d '{"itemId":1}'
 ```
 
 ## Endpointy Auth
 
 ### GET /auth/login
 
+Punkt wejścia logowania (redirect).
+
+**Autentykacja:** Nie wymagana
+
+**Odpowiedź:** 302 Redirect
+- Gdy Azure AD jest włączone i nie skonfigurowano kont lokalnych: od razu rozpoczyna logowanie Microsoft.
+- W pozostałych przypadkach: redirect do `/auth/login-page`.
+
+---
+
+### GET /auth/login-page
+
 Strona wyboru metody logowania (HTML).
 
 **Autentykacja:** Nie wymagana
+
+**Parametry query:**
+- `error` (opcjonalny) - Komunikat błędu do wyświetlenia (przed renderowaniem jest HTML-escapowany)
 
 **Odpowiedź:**
 ```html
 <!DOCTYPE html>
 <html>
-  <!-- Formularz wyboru: Microsoft / Local -->
+  <!-- Przycisk "Zaloguj się kontem Microsoft"
+       + (jeśli skonfigurowano konta lokalne) link do /auth/local-login -->
 </html>
+```
+
+**Przykład:**
+```bash
+curl -X GET "http://localhost:3000/auth/login-page?error=Sesja wygasła"
 ```
 
 ---
@@ -127,38 +191,45 @@ Redirect do Microsoft OAuth login.
 **Flow:**
 1. Redirect do `login.microsoftonline.com`
 2. User loguje się w Microsoft
-3. Callback do `/auth/callback`
+3. Microsoft odsyła przeglądarkę na `POST /auth/callback` (form_post)
 
 **Parametry:** Brak
 
-**Odpowiedź:** 302 Redirect
+**Odpowiedź:**
+- Sukces: 302 Redirect do Microsoft
+- Azure AD nieskonfigurowane: 302 Redirect do `/auth/login-page?error=Logowanie Microsoft nie jest skonfigurowane`
+- Błąd logowania: 302 Redirect do `/auth/login-page?error=Logowanie Microsoft nie powiodło się`
 
 ---
 
-### GET /auth/callback
+### POST /auth/callback
 
-Microsoft OAuth callback (nie wywoływać ręcznie).
+Microsoft OAuth callback (nie wywoływać ręcznie). Azure AD odsyła odpowiedź metodą **POST** (`response_mode=form_post`), nie GET.
 
 **Autentykacja:** Nie wymagana
 
-**Parametry query:**
-- `code` - Authorization code z Microsoft
-- `state` - CSRF token
+**Content-Type:** `application/x-www-form-urlencoded`
+
+**Parametry body (wysyłane przez Microsoft):**
+- `code` / `id_token` - Odpowiedź autoryzacyjna z Microsoft
+- `state` - Token anti-CSRF
 
 **Odpowiedź:**
 - Sukces: 302 Redirect do `/`
-- Błąd: 302 Redirect do `/auth/login?error=...`
+- Błąd: 302 Redirect do `/auth/login-page?error=Logowanie Microsoft nie powiodło się`
+
+**Uwaga:** Endpoint jest wyłączony spod kontroli nagłówka Origin (CSRF) - to cross-site POST z domeny Microsoft.
 
 ---
 
 ### GET /auth/local-login
 
-Formularz logowania lokalnego (HTML).
+Formularz logowania lokalnego (HTML) - tylko dla testerów/administratorów.
 
 **Autentykacja:** Nie wymagana
 
 **Parametry query:**
-- `error` (opcjonalny) - Komunikat błędu do wyświetlenia
+- `error` (opcjonalny) - Komunikat błędu do wyświetlenia (przed renderowaniem jest HTML-escapowany)
 
 **Odpowiedź:**
 ```html
@@ -167,6 +238,8 @@ Formularz logowania lokalnego (HTML).
   <!-- Formularz: username + password -->
 </html>
 ```
+
+**Uwaga:** Gdy nie skonfigurowano kont lokalnych: 302 Redirect do `/auth/login-page?error=Logowanie lokalne nie jest dostępne`.
 
 ---
 
@@ -187,10 +260,14 @@ password=haslo123
 **Odpowiedź:**
   - Sukces: 302 Redirect do `/`
   - Błąd: 302 Redirect do `/auth/local-login?error=Nieprawidłowy login lub hasło`
+  - Błąd serwera: 302 Redirect do `/auth/local-login?error=Błąd serwera` (lub `error=Błąd logowania`)
+  - Konta lokalne wyłączone: 302 Redirect do `/auth/login-page?error=Logowanie lokalne nie jest dostępne`
 
-**Rate limiting:**
-- 5 prób per konto
-- Blokada: 15 minut
+**Blokada konta (rate limiting):**
+- Limity konfigurowane zmiennymi środowiskowymi: `LOGIN_MAX_ATTEMPTS` (domyślnie 5 prób) i `LOGIN_LOCKOUT_MINUTES` (domyślnie 15 minut blokady)
+- Nieudane próby liczone per login (username)
+- Stan trzymany w pamięci procesu - restart serwera zeruje liczniki i blokady
+- Przeglądarka zawsze otrzymuje ogólny redirect z komunikatem `Nieprawidłowy login lub hasło` - szczegółowy komunikat o blokadzie nie jest ujawniany (trafia tylko do logów serwera)
 
 **Przykład (curl):**
 ```bash
@@ -201,18 +278,43 @@ curl -X POST http://localhost:3000/auth/local \
 
 ---
 
+### GET /auth/logout
+
+Strona potwierdzenia wylogowania (HTML) - dla zapisanych zakładek lub ręcznej nawigacji. Zawiera formularz wysyłający `POST /auth/logout`.
+
+**Autentykacja:** Nie wymagana (niezalogowany: 302 Redirect do `/auth/login-page`)
+
+**Odpowiedź (zalogowany):**
+```html
+<!DOCTYPE html>
+<html>
+  <!-- Potwierdzenie: przycisk "Wyloguj" (POST /auth/logout) + "Anuluj" -->
+</html>
+```
+
+**Przykład:**
+```bash
+curl -X GET http://localhost:3000/auth/logout \
+  -b cookies.txt
+```
+
+---
+
 ### POST /auth/logout
 
-Wylogowanie użytkownika.
+Wylogowanie użytkownika (niszczy sesję).
 
-**Autentykacja:** Wymagana sesja użytkownika
+**Autentykacja:** Nie wymagana (żądanie bez sesji również kończy się przekierowaniem)
 
-**Odpowiedź:** 302 Redirect do `/auth/login`
+**Odpowiedź:** 302 Redirect do `/auth/login-page`
+
+**Uwaga:** Dla zalogowanej sesji obowiązuje kontrola CSRF - żądanie musi mieć poprawny nagłówek `Origin` lub `Referer`.
 
 **Przykład:**
 ```bash
 curl -X POST http://localhost:3000/auth/logout \
-  -b cookies.txt
+  -b cookies.txt \
+  -H "Origin: http://localhost:3000"
 ```
 
 ---
@@ -221,9 +323,9 @@ curl -X POST http://localhost:3000/auth/logout \
 
 Informacje o zalogowanym użytkowniku.
 
-**Autentykacja:** Wymagana (requireAuth)
+**Autentykacja:** Nie wymagana (endpoint nie używa middleware - nigdy nie zwraca 401)
 
-**Odpowiedź (zalogowany):**
+**Odpowiedź (zalogowany, 200):**
 ```json
 {
   "id": "4947083a-cc9c-429f-9050-6a23cac87562",
@@ -233,7 +335,7 @@ Informacje o zalogowanym użytkowniku.
 }
 ```
 
-**Odpowiedź (niezalogowany):**
+**Odpowiedź (niezalogowany, 200):**
 ```json
 null
 ```
@@ -254,39 +356,67 @@ Lista dostępnych przedmiotów (dla pracowników).
 
 **Autentykacja:** Wymagana (requireAuth)
 
-**Filtry:** Automatyczne - tylko `status = 'available'`
+**Filtry:** Automatyczne - tylko `status = 'available'` i `isVisible = 1`
 
-**Odpowiedź:**
+**Parametry query:**
+| Pole | Typ | Wymagane | Opis |
+|------|-----|----------|------|
+| limit | int | NIE | Jeśli podany, odpowiedź jest paginowana. Max 50, domyślnie 15 (przy wartości nieliczbowej) |
+| offset | int | NIE | Przesunięcie paginacji (domyślnie 0, używane tylko razem z `limit`) |
+| sort | string | NIE | Sortowanie: `newest` (domyślnie), `oldest`, `price_asc`, `price_desc` |
+| category | string | NIE | Filtr kategorii (phone/desktop/laptop/monitor/other) |
+
+**Odpowiedź (bez `limit` - zwykła tablica):**
 ```json
 [
   {
     "id": 1,
-    "name": "Dell Monitor 24 cale",
-    "description": "Stan bardzo dobry, full HD",
-    "category": "monitor",
-    "imagePath": "/images/item-123.jpg",
-    "price": 150.00,
+    "name": "Dell Latitude 5420",
+    "description": "Stan bardzo dobry, bateria 90%",
+    "category": "laptop",
+    "price": 1200.00,
     "status": "available",
+    "imagePath": "/images/item-123.jpg",
     "createdAt": "2026-01-15T10:00:00.000Z",
+    "createdBy": "4947083a-cc9c-429f-9050-6a23cac87562",
+    "quantity": 1,
+    "isVisible": 1,
     "images": [
       {
         "id": 1,
+        "itemId": 1,
         "imagePath": "/images/item-123.jpg",
-        "sortOrder": 0
+        "thumbnailPath": "/images/thumb-item-123.jpg",
+        "sortOrder": 0,
+        "createdAt": "2026-01-15T10:00:00.000Z"
       },
       {
         "id": 2,
+        "itemId": 1,
         "imagePath": "/images/item-124.jpg",
-        "sortOrder": 1
+        "thumbnailPath": "/images/thumb-item-124.jpg",
+        "sortOrder": 1,
+        "createdAt": "2026-01-15T10:00:00.000Z"
       }
     ]
   }
 ]
 ```
 
+**Odpowiedź (z `limit` - paginowana):**
+```json
+{
+  "items": [ { "id": 1, "name": "Dell Latitude 5420", "...": "..." } ],
+  "total": 42,
+  "hasMore": true
+}
+```
+
+**Uwaga:** Pole `adminNote` jest usuwane z odpowiedzi tego endpointu (dla wszystkich użytkowników).
+
 **Przykład:**
 ```bash
-curl -X GET http://localhost:3000/api/items \
+curl -X GET "http://localhost:3000/api/items?limit=15&offset=0&sort=price_asc&category=laptop" \
   -b cookies.txt
 ```
 
@@ -294,11 +424,11 @@ curl -X GET http://localhost:3000/api/items \
 
 ### GET /api/items/all
 
-Lista wszystkich przedmiotów (w tym zarezerwowane i sprzedane).
+Lista wszystkich przedmiotów (w tym zarezerwowane, sprzedane i ukryte).
 
 **Autentykacja:** Wymagana (requireAdmin)
 
-**Odpowiedź:** Jak `/api/items`, ale wszystkie statusy.
+**Odpowiedź:** Jak `/api/items` (zwykła tablica, bez paginacji), ale wszystkie statusy. Każdy przedmiot zawiera dodatkowo `adminNote` oraz pola statystyk: `favoriteCount`, `reservedCount`, `soldCount`, `soldValue`, `buyers`, `buyerEmails`, `reservingUsers`, `reservingEmails`, `lastSoldAt`, `lastReservedAt`.
 
 **Przykład:**
 ```bash
@@ -321,18 +451,23 @@ Szczegóły pojedynczego przedmiotu.
 ```json
 {
   "id": 1,
-  "name": "Dell Monitor 24 cale",
-  "description": "Stan bardzo dobry, full HD",
-  "category": "monitor",
-  "imagePath": "/images/item-123.jpg",
-  "price": 150.00,
+  "name": "Dell Latitude 5420",
+  "description": "Stan bardzo dobry, bateria 90%",
+  "category": "laptop",
+  "price": 1200.00,
   "status": "available",
+  "imagePath": "/images/item-123.jpg",
   "createdAt": "2026-01-15T10:00:00.000Z",
+  "quantity": 1,
+  "isVisible": 1,
   "images": [
     {
       "id": 1,
+      "itemId": 1,
       "imagePath": "/images/item-123.jpg",
-      "sortOrder": 0
+      "thumbnailPath": "/images/thumb-item-123.jpg",
+      "sortOrder": 0,
+      "createdAt": "2026-01-15T10:00:00.000Z"
     }
   ]
 }
@@ -344,6 +479,10 @@ Szczegóły pojedynczego przedmiotu.
   "error": "Item not found"
 }
 ```
+
+**Uwagi:**
+- Nie-admin widzi tylko przedmioty widoczne (`isVisible = 1`) i dostępne (`status = 'available'`) - pozostałe zwracają 404.
+- Dla nie-adminów z odpowiedzi usuwane są pola `adminNote`, `createdBy`, `createdByEmail` i `createdByDisplayName`. Admin otrzymuje pełny obiekt razem z tymi polami.
 
 **Przykład:**
 ```bash
@@ -368,7 +507,10 @@ Dodaj nowy przedmiot.
 | category | string | TAK | Kategoria (phone/desktop/laptop/monitor/other) |
 | description | string | NIE | Opis |
 | price | number | NIE | Cena (PLN) |
-| images | file[] | NIE | Zdjęcia (max 10, max 10MB/plik, JPEG/PNG/GIF/WebP) |
+| adminNote | string | NIE | Notatka widoczna tylko dla adminów |
+| quantity | int | NIE | Ilość sztuk (>= 0, domyślnie 1) |
+| isVisible | int | NIE | Widoczność w katalogu (1 = widoczny, 0 = ukryty; domyślnie 1) |
+| images | file[] | NIE | Zdjęcia (max 10 plików, max 50MB/plik, JPEG/PNG/GIF/WebP) |
 
 **Odpowiedź (sukces 201):**
 ```json
@@ -381,11 +523,18 @@ Dodaj nowy przedmiot.
   "price": null,
   "status": "available",
   "createdAt": "2026-01-20T10:00:00.000Z",
+  "createdBy": "4947083a-cc9c-429f-9050-6a23cac87562",
+  "adminNote": null,
+  "quantity": 1,
+  "isVisible": 1,
   "images": [
     {
       "id": 10,
+      "itemId": 5,
       "imagePath": "/images/item-1737373200000-123456789.jpg",
-      "sortOrder": 0
+      "thumbnailPath": null,
+      "sortOrder": 0,
+      "createdAt": "2026-01-20T10:00:00.000Z"
     }
   ]
 }
@@ -397,15 +546,29 @@ Dodaj nowy przedmiot.
   "error": "Name and category are required"
 }
 ```
+```json
+{
+  "error": "Invalid category"
+}
+```
+```json
+{
+  "error": "Quantity must be a non-negative number"
+}
+```
+
+**Uwaga:** Miniatury (`thumbnailPath`) generowane są asynchronicznie - bezpośrednio po utworzeniu pole może być `null`.
 
 **Przykład (curl):**
 ```bash
 curl -X POST http://localhost:3000/api/items \
   -b cookies.txt \
+  -H "Origin: http://localhost:3000" \
   -F "name=iPhone 12 Pro" \
   -F "category=phone" \
   -F "description=Stan dobry" \
   -F "price=800" \
+  -F "quantity=2" \
   -F "images=@photo1.jpg" \
   -F "images=@photo2.jpg"
 ```
@@ -444,23 +607,49 @@ Edytuj przedmiot.
 | Pole | Typ | Opis |
 |------|-----|------|
 | name | string | Nazwa |
-| category | string | Kategoria |
+| category | string | Kategoria (phone/desktop/laptop/monitor/other) |
 | description | string | Opis |
 | price | number | Cena |
 | status | string | Status (available/reserved/sold) |
-| image | file | Nowe główne zdjęcie (legacy, lepiej użyć `/api/items/:id/images`) |
+| adminNote | string | Notatka widoczna tylko dla adminów |
+| quantity | int | Ilość sztuk (>= 0); ustawienie 0 automatycznie ukrywa przedmiot (`isVisible = 0`) |
+| isVisible | int | Widoczność w katalogu (1/0) |
+| image | file | Nowe główne zdjęcie (pojedynczy plik; legacy, lepiej użyć `/api/items/:id/images`) |
 
 **Odpowiedź (sukces 200):**
 ```json
 {
   "id": 1,
-  "name": "Dell Monitor 24\" (zaktualizowany)",
+  "name": "Dell Latitude 5420 (zaktualizowany)",
   "description": "Nowy opis",
-  "category": "monitor",
+  "category": "laptop",
   "imagePath": "/images/item-123.jpg",
-  "price": 120.00,
+  "price": 1100.00,
   "status": "available",
-  "createdAt": "2026-01-15T10:00:00.000Z"
+  "createdAt": "2026-01-15T10:00:00.000Z",
+  "createdBy": "4947083a-cc9c-429f-9050-6a23cac87562",
+  "adminNote": null,
+  "quantity": 1,
+  "isVisible": 1
+}
+```
+
+**Uwaga:** Odpowiedź to zaktualizowany przedmiot **bez** tablicy `images`.
+
+**Odpowiedź (błąd 400):**
+```json
+{
+  "error": "Invalid category"
+}
+```
+```json
+{
+  "error": "Quantity must be a non-negative number"
+}
+```
+```json
+{
+  "error": "Invalid image file"
 }
 ```
 
@@ -475,8 +664,9 @@ Edytuj przedmiot.
 ```bash
 curl -X PUT http://localhost:3000/api/items/1 \
   -b cookies.txt \
-  -F "name=Dell Monitor 24\" (refurbished)" \
-  -F "price=120"
+  -H "Origin: http://localhost:3000" \
+  -F "name=Dell Latitude 5420 (refurbished)" \
+  -F "price=1100"
 ```
 
 ---
@@ -504,12 +694,13 @@ Usuń przedmiot.
 }
 ```
 
-**Uwaga:** Usuwa też wszystkie zdjęcia (CASCADE) i pliki z dysku.
+**Uwaga:** Usuwa też wszystkie zdjęcia (CASCADE) wraz z miniaturami i plikami z dysku.
 
 **Przykład:**
 ```bash
 curl -X DELETE http://localhost:3000/api/items/1 \
-  -b cookies.txt
+  -b cookies.txt \
+  -H "Origin: http://localhost:3000"
 ```
 
 ---
@@ -526,19 +717,33 @@ Dodaj zdjęcia do istniejącego przedmiotu.
 - `id` - ID przedmiotu
 
 **Parametry body:**
-- `images` - Pliki zdjęć (max 10)
+- `images` - Pliki zdjęć (max 10, max 50MB/plik, JPEG/PNG/GIF/WebP)
 
 **Odpowiedź (sukces 200):**
 ```json
 {
   "id": 1,
-  "name": "Dell Monitor 24",
+  "name": "Dell Latitude 5420",
   ...
   "images": [
-    { "id": 1, "imagePath": "/images/item-123.jpg", "sortOrder": 0 },
-    { "id": 2, "imagePath": "/images/item-124.jpg", "sortOrder": 1 },
-    { "id": 3, "imagePath": "/images/item-125.jpg", "sortOrder": 2 }
+    { "id": 1, "itemId": 1, "imagePath": "/images/item-123.jpg", "thumbnailPath": "/images/thumb-item-123.jpg", "sortOrder": 0, "createdAt": "2026-01-15T10:00:00.000Z" },
+    { "id": 2, "itemId": 1, "imagePath": "/images/item-124.jpg", "thumbnailPath": "/images/thumb-item-124.jpg", "sortOrder": 1, "createdAt": "2026-01-15T10:00:00.000Z" },
+    { "id": 3, "itemId": 1, "imagePath": "/images/item-125.jpg", "thumbnailPath": null, "sortOrder": 2, "createdAt": "2026-01-20T10:00:00.000Z" }
   ]
+}
+```
+
+**Odpowiedź (błąd 400 - żaden plik nie przeszedł walidacji):**
+```json
+{
+  "error": "No valid images provided"
+}
+```
+
+**Odpowiedź (błąd 404):**
+```json
+{
+  "error": "Item not found"
 }
 ```
 
@@ -546,6 +751,7 @@ Dodaj zdjęcia do istniejącego przedmiotu.
 ```bash
 curl -X POST http://localhost:3000/api/items/1/images \
   -b cookies.txt \
+  -H "Origin: http://localhost:3000" \
   -F "images=@photo3.jpg" \
   -F "images=@photo4.jpg"
 ```
@@ -566,15 +772,20 @@ Usuń pojedyncze zdjęcie.
 ```json
 {
   "id": 1,
-  "name": "Dell Monitor 24",
+  "name": "Dell Latitude 5420",
   ...
   "images": [
-    { "id": 1, "imagePath": "/images/item-123.jpg", "sortOrder": 0 }
+    { "id": 1, "itemId": 1, "imagePath": "/images/item-123.jpg", "thumbnailPath": "/images/thumb-item-123.jpg", "sortOrder": 0, "createdAt": "2026-01-15T10:00:00.000Z" }
   ]
 }
 ```
 
 **Odpowiedź (błąd 404):**
+```json
+{
+  "error": "Item not found"
+}
+```
 ```json
 {
   "error": "Image not found"
@@ -584,7 +795,8 @@ Usuń pojedyncze zdjęcie.
 **Przykład:**
 ```bash
 curl -X DELETE http://localhost:3000/api/items/1/images/2 \
-  -b cookies.txt
+  -b cookies.txt \
+  -H "Origin: http://localhost:3000"
 ```
 
 ---
@@ -615,13 +827,27 @@ Zmień kolejność zdjęć.
 ```json
 {
   "id": 1,
-  "name": "Dell Monitor 24",
+  "name": "Dell Latitude 5420",
   ...
   "images": [
-    { "id": 2, "imagePath": "/images/item-124.jpg", "sortOrder": 0 },
-    { "id": 1, "imagePath": "/images/item-123.jpg", "sortOrder": 1 },
-    { "id": 3, "imagePath": "/images/item-125.jpg", "sortOrder": 2 }
+    { "id": 2, "itemId": 1, "imagePath": "/images/item-124.jpg", "thumbnailPath": "/images/thumb-item-124.jpg", "sortOrder": 0, "createdAt": "2026-01-15T10:00:00.000Z" },
+    { "id": 1, "itemId": 1, "imagePath": "/images/item-123.jpg", "thumbnailPath": "/images/thumb-item-123.jpg", "sortOrder": 1, "createdAt": "2026-01-15T10:00:00.000Z" },
+    { "id": 3, "itemId": 1, "imagePath": "/images/item-125.jpg", "thumbnailPath": "/images/thumb-item-125.jpg", "sortOrder": 2, "createdAt": "2026-01-15T10:00:00.000Z" }
   ]
+}
+```
+
+**Odpowiedź (błąd 400):**
+```json
+{
+  "error": "imageOrder must be an array"
+}
+```
+
+**Odpowiedź (błąd 404):**
+```json
+{
+  "error": "Item not found"
 }
 ```
 
@@ -629,8 +855,114 @@ Zmień kolejność zdjęć.
 ```bash
 curl -X PUT http://localhost:3000/api/items/1/images/order \
   -b cookies.txt \
+  -H "Origin: http://localhost:3000" \
   -H "Content-Type: application/json" \
   -d '{"imageOrder":[{"id":2,"sortOrder":0},{"id":1,"sortOrder":1}]}'
+```
+
+---
+
+### GET /api/items/:id/history
+
+Historia przedmiotu: zakończone/anulowane rezerwacje, aktywne rezerwacje i historia edycji.
+
+**Autentykacja:** Wymagana (requireAdmin)
+
+**Parametry URL:**
+- `id` - ID przedmiotu
+
+**Odpowiedź (sukces 200):**
+```json
+{
+  "history": [
+    {
+      "id": 3,
+      "itemId": 1,
+      "userId": "4947083a-cc9c-429f-9050-6a23cac87562",
+      "status": "cancelled",
+      "createdAt": "2026-01-18T09:00:00.000Z",
+      "completedAt": null,
+      "cancelledAt": "2026-01-19T14:30:00.000Z",
+      "price": 1200.00,
+      "adminNote": null,
+      "adminOrderId": null,
+      "customPrice": null,
+      "userEmail": "jan.kowalski@example.com",
+      "userDisplayName": "Jan Kowalski"
+    }
+  ],
+  "activeReservations": [
+    {
+      "id": 5,
+      "itemId": 1,
+      "userId": "4947083a-cc9c-429f-9050-6a23cac87562",
+      "status": "pending",
+      "createdAt": "2026-01-20T10:30:00.000Z",
+      "adminNote": null,
+      "adminOrderId": null,
+      "customPrice": null,
+      "userEmail": "jan.kowalski@example.com",
+      "userDisplayName": "Jan Kowalski"
+    }
+  ],
+  "editHistory": [
+    {
+      "id": 12,
+      "itemId": 1,
+      "userId": "4947083a-cc9c-429f-9050-6a23cac87562",
+      "changes": "{\"price\":1100}",
+      "createdAt": "2026-01-19T16:00:00.000Z",
+      "userEmail": "jan.kowalski@example.com",
+      "userDisplayName": "Jan Kowalski"
+    }
+  ]
+}
+```
+
+**Uwaga:** Pole `changes` w `editHistory` to JSON zserializowany do stringa.
+
+**Odpowiedź (błąd 404):**
+```json
+{
+  "error": "Item not found"
+}
+```
+
+**Przykład:**
+```bash
+curl -X GET http://localhost:3000/api/items/1/history \
+  -b cookies.txt
+```
+
+---
+
+### GET /api/items/:id/favorites/count
+
+Liczba użytkowników, którzy dodali przedmiot do ulubionych.
+
+**Autentykacja:** Wymagana (requireAuth)
+
+**Parametry URL:**
+- `id` - ID przedmiotu
+
+**Odpowiedź (sukces 200):**
+```json
+{
+  "count": 3
+}
+```
+
+**Odpowiedź (błąd 404):**
+```json
+{
+  "error": "Item not found"
+}
+```
+
+**Przykład:**
+```bash
+curl -X GET http://localhost:3000/api/items/1/favorites/count \
+  -b cookies.txt
 ```
 
 ---
@@ -643,7 +975,7 @@ Lista wszystkich rezerwacji (dla adminów).
 
 **Autentykacja:** Wymagana (requireAdmin)
 
-**Odpowiedź:**
+**Odpowiedź:** Płaska tablica obiektów rezerwacji (bez zagnieżdżonych obiektów `item`/`user`):
 ```json
 [
   {
@@ -652,16 +984,17 @@ Lista wszystkich rezerwacji (dla adminów).
     "userId": "4947083a-cc9c-429f-9050-6a23cac87562",
     "status": "pending",
     "createdAt": "2026-01-20T10:00:00.000Z",
-    "item": {
-      "id": 1,
-      "name": "Dell Monitor 24",
-      "imagePath": "/images/item-123.jpg"
-    },
-    "user": {
-      "id": "4947083a-cc9c-429f-9050-6a23cac87562",
-      "email": "jan.kowalski@example.com",
-      "displayName": "Jan Kowalski"
-    }
+    "adminNote": null,
+    "adminOrderId": null,
+    "customPrice": null,
+    "itemName": "Dell Latitude 5420",
+    "itemCategory": "laptop",
+    "itemPrice": 1200.00,
+    "userEmail": "jan.kowalski@example.com",
+    "userDisplayName": "Jan Kowalski",
+    "discountType": null,
+    "discountValue": null,
+    "orderAdminNote": null
   }
 ]
 ```
@@ -674,13 +1007,90 @@ curl -X GET http://localhost:3000/api/reservations \
 
 ---
 
+### GET /api/reservations/my
+
+Lista rezerwacji zalogowanego użytkownika.
+
+**Autentykacja:** Wymagana (requireAuth)
+
+**Odpowiedź:** Jak `GET /api/reservations`, ale tylko własne rezerwacje i **bez pól administracyjnych** - z każdego obiektu usuwane są `adminNote`, `orderAdminNote`, `discountType` i `discountValue`:
+```json
+[
+  {
+    "id": 1,
+    "itemId": 1,
+    "userId": "4947083a-cc9c-429f-9050-6a23cac87562",
+    "status": "pending",
+    "createdAt": "2026-01-20T10:00:00.000Z",
+    "adminOrderId": null,
+    "customPrice": null,
+    "itemName": "Dell Latitude 5420",
+    "itemCategory": "laptop",
+    "itemPrice": 1200.00,
+    "userEmail": "jan.kowalski@example.com",
+    "userDisplayName": "Jan Kowalski"
+  }
+]
+```
+
+**Przykład:**
+```bash
+curl -X GET http://localhost:3000/api/reservations/my \
+  -b cookies.txt
+```
+
+---
+
+### GET /api/reservations/:id
+
+Szczegóły pojedynczej rezerwacji.
+
+**Autentykacja:** Wymagana (requireAdmin)
+
+**Parametry URL:**
+- `id` - ID rezerwacji
+
+**Odpowiedź (sukces 200):** Płaski obiekt rezerwacji (bez pól z tabeli zamówień admina: `discountType`, `discountValue`, `orderAdminNote`):
+```json
+{
+  "id": 1,
+  "itemId": 1,
+  "userId": "4947083a-cc9c-429f-9050-6a23cac87562",
+  "status": "pending",
+  "createdAt": "2026-01-20T10:00:00.000Z",
+  "adminNote": null,
+  "adminOrderId": null,
+  "customPrice": null,
+  "itemName": "Dell Latitude 5420",
+  "itemCategory": "laptop",
+  "itemPrice": 1200.00,
+  "userEmail": "jan.kowalski@example.com",
+  "userDisplayName": "Jan Kowalski"
+}
+```
+
+**Odpowiedź (błąd 404):**
+```json
+{
+  "error": "Reservation not found"
+}
+```
+
+**Przykład:**
+```bash
+curl -X GET http://localhost:3000/api/reservations/1 \
+  -b cookies.txt
+```
+
+---
+
 ### POST /api/reservations
 
 Utwórz nową rezerwację.
 
 **Autentykacja:** Wymagana (requireAuth)
 
-**Rate Limit:** 10 rezerwacji/godzinę per user
+**Rate Limit:** 10 rezerwacji/godzinę per user (klucz: ID zalogowanego użytkownika)
 
 **Content-Type:** `application/json`
 
@@ -691,21 +1101,43 @@ Utwórz nową rezerwację.
 }
 ```
 
-**Odpowiedź (sukces 201):**
+**Odpowiedź (sukces 201):** Rezerwacja bez pól administracyjnych (`adminNote`, `orderAdminNote`, `discountType`, `discountValue`) plus pole `emailSent`:
 ```json
 {
   "id": 5,
   "itemId": 1,
   "userId": "4947083a-cc9c-429f-9050-6a23cac87562",
   "status": "pending",
-  "createdAt": "2026-01-20T10:30:00.000Z"
+  "createdAt": "2026-01-20T10:30:00.000Z",
+  "adminOrderId": null,
+  "customPrice": null,
+  "itemName": "Dell Latitude 5420",
+  "itemCategory": "laptop",
+  "itemPrice": 1200.00,
+  "userEmail": "jan.kowalski@example.com",
+  "userDisplayName": "Jan Kowalski",
+  "emailSent": true
+}
+```
+
+**Odpowiedź (błąd 400 - brak itemId):**
+```json
+{
+  "error": "itemId is required"
+}
+```
+
+**Odpowiedź (błąd 400 - limit aktywnych rezerwacji):**
+```json
+{
+  "error": "Osiągnięto limit 3 aktywnych rezerwacji. Anuluj jedną z istniejących rezerwacji, aby móc zarezerwować nowy przedmiot."
 }
 ```
 
 **Odpowiedź (błąd 400 - przedmiot niedostępny):**
 ```json
 {
-  "error": "Item not available"
+  "error": "Ten przedmiot nie jest już dostępny. Odśwież stronę, aby zobaczyć aktualną listę."
 }
 ```
 
@@ -720,13 +1152,117 @@ Utwórz nową rezerwację.
 ```bash
 curl -X POST http://localhost:3000/api/reservations \
   -b cookies.txt \
+  -H "Origin: http://localhost:3000" \
   -H "Content-Type: application/json" \
   -d '{"itemId":1}'
 ```
 
 **Co się dzieje po utworzeniu:**
-1. Status przedmiotu zmienia się na `reserved`
-2. Email wysyłany do `NOTIFICATION_EMAIL` z danymi użytkownika
+1. Ilość (`quantity`) przedmiotu zmniejsza się o 1
+2. Gdy `quantity` spadnie do 0, status przedmiotu zmienia się na `reserved`
+3. Email wysyłany do `NOTIFICATION_EMAIL` z danymi użytkownika (wynik w polu `emailSent`)
+
+---
+
+### POST /api/reservations/admin-order
+
+Ręczne zamówienie admina - zbiorcza rezerwacja z opcjonalnym rabatem, omija limit 3 aktywnych rezerwacji i limiter 10/h.
+
+**Autentykacja:** Wymagana (requireAdmin)
+
+**Content-Type:** `application/json`
+
+**Parametry body:**
+| Pole | Typ | Wymagane | Opis |
+|------|-----|----------|------|
+| itemId | int | TAK | ID przedmiotu |
+| userId | string | TAK | ID użytkownika, dla którego składane jest zamówienie |
+| quantity | int | NIE | Ilość sztuk (min 1, domyślnie 1) |
+| adminNote | string | TAK | Notatka admina (niepusta) |
+| discountType | string | NIE | Typ rabatu: `percent` lub `fixed` |
+| discountValue | number | NIE | Wartość rabatu (>= 0; dla `percent` max 100, dla `fixed` max cena przedmiotu) |
+
+**Odpowiedź (sukces 201):**
+```json
+{
+  "success": true,
+  "adminOrderId": "f2b9c9a4-8f4e-4c1a-9c2d-6a23cac87562",
+  "count": 2,
+  "reservations": [
+    {
+      "id": 8,
+      "itemId": 1,
+      "userId": "4947083a-cc9c-429f-9050-6a23cac87562",
+      "status": "pending",
+      "createdAt": "2026-01-20T11:00:00.000Z",
+      "adminOrderId": "f2b9c9a4-8f4e-4c1a-9c2d-6a23cac87562",
+      "customPrice": 1080.00,
+      "itemName": "Dell Latitude 5420",
+      "itemCategory": "laptop",
+      "itemPrice": 1200.00,
+      "userEmail": "jan.kowalski@example.com",
+      "userDisplayName": "Jan Kowalski"
+    }
+  ],
+  "emailSent": true
+}
+```
+
+**Odpowiedź (błąd 400):**
+```json
+{
+  "error": "itemId i userId są wymagane"
+}
+```
+```json
+{
+  "error": "Notatka admina jest wymagana"
+}
+```
+```json
+{
+  "error": "Ilość musi być co najmniej 1"
+}
+```
+```json
+{
+  "error": "Typ rabatu musi być \"percent\" lub \"fixed\""
+}
+```
+```json
+{
+  "error": "Wartość rabatu musi być >= 0"
+}
+```
+```json
+{
+  "error": "Rabat procentowy nie może przekroczyć 100%"
+}
+```
+```json
+{
+  "error": "Rabat stały nie może przekroczyć ceny przedmiotu"
+}
+```
+```json
+{
+  "error": "Użytkownik nie istnieje"
+}
+```
+```json
+{
+  "error": "Nie udało się utworzyć zamówienia. Sprawdź czy przedmiot jest dostępny i ma wystarczającą ilość."
+}
+```
+
+**Przykład:**
+```bash
+curl -X POST http://localhost:3000/api/reservations/admin-order \
+  -b cookies.txt \
+  -H "Origin: http://localhost:3000" \
+  -H "Content-Type: application/json" \
+  -d '{"itemId":1,"userId":"4947083a-cc9c-429f-9050-6a23cac87562","quantity":2,"adminNote":"Zamówienie działowe","discountType":"percent","discountValue":10}'
+```
 
 ---
 
@@ -754,20 +1290,66 @@ Finalizuj rezerwację (oznacz jako sprzedane).
 ```
 
 **Co się dzieje:**
-1. Status rezerwacji zmienia się na `completed`
-2. Status przedmiotu zmienia się na `sold`
+1. Rezerwacja jest przenoszona do historii ze statusem `completed` (z ceną z chwili sprzedaży)
+2. Gdy to była ostatnia rezerwacja przedmiotu i jego `quantity` wynosi 0, status przedmiotu zmienia się na `sold`
 
 **Przykład:**
 ```bash
 curl -X POST http://localhost:3000/api/reservations/1/complete \
-  -b cookies.txt
+  -b cookies.txt \
+  -H "Origin: http://localhost:3000"
 ```
 
 ---
 
-### POST /api/reservations/:id/cancel
+### DELETE /api/reservations/my/:id
 
-Anuluj rezerwację.
+Anuluj własną rezerwację (dla pracowników).
+
+**Autentykacja:** Wymagana (requireAuth)
+
+**Parametry URL:**
+- `id` - ID rezerwacji
+
+**Odpowiedź (sukces 200):**
+```json
+{
+  "success": true,
+  "emailSent": true
+}
+```
+
+**Odpowiedź (błąd 403 - cudza rezerwacja):**
+```json
+{
+  "error": "You can only cancel your own reservations"
+}
+```
+
+**Odpowiedź (błąd 404):**
+```json
+{
+  "error": "Reservation not found"
+}
+```
+
+**Co się dzieje:**
+1. Rezerwacja jest przenoszona do historii ze statusem `cancelled`
+2. Ilość (`quantity`) przedmiotu zwiększa się o 1, a status wraca do `available`
+3. Email o anulowaniu wysyłany do `NOTIFICATION_EMAIL`
+
+**Przykład:**
+```bash
+curl -X DELETE http://localhost:3000/api/reservations/my/5 \
+  -b cookies.txt \
+  -H "Origin: http://localhost:3000"
+```
+
+---
+
+### DELETE /api/reservations/:id
+
+Anuluj rezerwację (dla adminów).
 
 **Autentykacja:** Wymagana (requireAdmin)
 
@@ -777,18 +1359,293 @@ Anuluj rezerwację.
 **Odpowiedź (sukces 200):**
 ```json
 {
-  "success": true
+  "success": true,
+  "emailSent": true
+}
+```
+
+**Odpowiedź (błąd 404):**
+```json
+{
+  "error": "Reservation not found"
 }
 ```
 
 **Co się dzieje:**
-1. Status rezerwacji zmienia się na `cancelled`
-2. Status przedmiotu zmienia się na `available`
+1. Rezerwacja jest przenoszona do historii ze statusem `cancelled`
+2. Ilość (`quantity`) przedmiotu zwiększa się o 1, a status wraca do `available`
 3. Przedmiot wraca do katalogu
+4. Email o anulowaniu wysyłany do `NOTIFICATION_EMAIL`
 
 **Przykład:**
 ```bash
-curl -X POST http://localhost:3000/api/reservations/1/cancel \
+curl -X DELETE http://localhost:3000/api/reservations/1 \
+  -b cookies.txt \
+  -H "Origin: http://localhost:3000"
+```
+
+---
+
+### PUT /api/reservations/:id/note
+
+Ustaw lub wyczyść notatkę admina przy rezerwacji.
+
+**Autentykacja:** Wymagana (requireAdmin)
+
+**Content-Type:** `application/json`
+
+**Parametry URL:**
+- `id` - ID rezerwacji
+
+**Parametry body:**
+```json
+{
+  "adminNote": "Odbiór w piątek"
+}
+```
+
+Wartość `null` (lub pusty string / same białe znaki) czyści notatkę. Tekst jest trimowany przed zapisem.
+
+**Odpowiedź (sukces 200):**
+```json
+{
+  "success": true,
+  "adminNote": "Odbiór w piątek"
+}
+```
+
+**Odpowiedź (błąd 400):**
+```json
+{
+  "error": "adminNote must be a string or null"
+}
+```
+
+**Odpowiedź (błąd 404):**
+```json
+{
+  "error": "Reservation not found"
+}
+```
+
+**Odpowiedź (błąd 500):**
+```json
+{
+  "error": "Failed to update note"
+}
+```
+
+**Przykład:**
+```bash
+curl -X PUT http://localhost:3000/api/reservations/1/note \
+  -b cookies.txt \
+  -H "Origin: http://localhost:3000" \
+  -H "Content-Type: application/json" \
+  -d '{"adminNote":"Odbiór w piątek"}'
+```
+
+---
+
+### GET /api/reservations/export/excel
+
+Eksport rezerwacji do pliku Excel.
+
+**Autentykacja:** Wymagana (requireAdmin)
+
+**Parametry query:**
+| Pole | Typ | Wymagane | Opis |
+|------|-----|----------|------|
+| sort | string | NIE | Sortowanie: `date` (domyślnie), `user`, `item`, `category` |
+| order | string | NIE | Kierunek: `asc` lub `desc` (domyślnie `desc`) |
+| status | string | NIE | Filtr statusu (domyślnie `pending`); wartość `all` wyłącza filtr |
+
+**Odpowiedź (sukces 200):** Plik `.xlsx` (binarny), nie JSON.
+- `Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`
+- `Content-Disposition: attachment; filename="rezerwacje_<status>_<YYYY-MM-DD>.xlsx"` - gdzie `<status>` to `aktywne` (dla `pending`), `wszystkie` (dla `all`) lub nazwa statusu, np. `rezerwacje_aktywne_2026-07-08.xlsx`
+
+Kolumny arkusza: ID, Data rezerwacji, Użytkownik, Email, Przedmiot, Kategoria, Cena katalogowa, Rabat, Cena końcowa, Status, Zam. admina, Nr zamówienia, Notatka admina.
+
+**Przykład:**
+```bash
+curl -X GET "http://localhost:3000/api/reservations/export/excel?sort=user&order=asc&status=all" \
+  -b cookies.txt \
+  -o rezerwacje.xlsx
+```
+
+---
+
+## Endpointy Favorites
+
+Ulubione pozwalają pracownikom oznaczać przedmioty, do których chcą wrócić. Dotyczą wyłącznie przedmiotów widocznych w katalogu (`isVisible = 1`).
+
+### GET /api/favorites/my
+
+Lista ulubionych zalogowanego użytkownika (z danymi przedmiotów).
+
+**Autentykacja:** Wymagana (requireAuth)
+
+**Odpowiedź (sukces 200):**
+```json
+[
+  {
+    "id": 1,
+    "userId": "4947083a-cc9c-429f-9050-6a23cac87562",
+    "itemId": 1,
+    "createdAt": "2026-01-20T10:00:00.000Z",
+    "itemName": "Dell Latitude 5420",
+    "itemCategory": "laptop",
+    "itemPrice": 1200.00,
+    "itemImagePath": "/images/item-123.jpg",
+    "itemStatus": "available"
+  }
+]
+```
+
+**Uwaga:** Zwracane są tylko ulubione dotyczące widocznych przedmiotów, posortowane od najnowszych.
+
+**Przykład:**
+```bash
+curl -X GET http://localhost:3000/api/favorites/my \
+  -b cookies.txt
+```
+
+---
+
+### GET /api/favorites/my/ids
+
+Same ID ulubionych przedmiotów (szybkie sprawdzenie stanu, np. do renderowania serduszek w katalogu).
+
+**Autentykacja:** Wymagana (requireAuth)
+
+**Odpowiedź (sukces 200):**
+```json
+[1, 5, 12]
+```
+
+**Przykład:**
+```bash
+curl -X GET http://localhost:3000/api/favorites/my/ids \
+  -b cookies.txt
+```
+
+---
+
+### POST /api/favorites
+
+Dodaj przedmiot do ulubionych.
+
+**Autentykacja:** Wymagana (requireAuth)
+
+**Content-Type:** `application/json`
+
+**Parametry body:**
+```json
+{
+  "itemId": 5
+}
+```
+
+**Odpowiedź (sukces 201):**
+```json
+{
+  "id": 7,
+  "userId": "4947083a-cc9c-429f-9050-6a23cac87562",
+  "itemId": 5,
+  "createdAt": "2026-01-20T10:30:00.000Z"
+}
+```
+
+**Odpowiedź (błąd 400 - brak itemId):**
+```json
+{
+  "error": "itemId is required"
+}
+```
+
+**Odpowiedź (błąd 400 - przedmiot nie istnieje, jest ukryty lub już jest w ulubionych):**
+```json
+{
+  "error": "Nie można dodać do ulubionych"
+}
+```
+
+**Przykład:**
+```bash
+curl -X POST http://localhost:3000/api/favorites \
+  -b cookies.txt \
+  -H "Origin: http://localhost:3000" \
+  -H "Content-Type: application/json" \
+  -d '{"itemId":5}'
+```
+
+---
+
+### DELETE /api/favorites/:itemId
+
+Usuń przedmiot z ulubionych.
+
+**Autentykacja:** Wymagana (requireAuth)
+
+**Parametry URL:**
+- `itemId` - ID przedmiotu (nie ID wpisu ulubionych)
+
+**Odpowiedź (sukces 200):**
+```json
+{
+  "success": true
+}
+```
+
+**Odpowiedź (błąd 404):**
+```json
+{
+  "error": "Favorite not found"
+}
+```
+
+**Przykład:**
+```bash
+curl -X DELETE http://localhost:3000/api/favorites/5 \
+  -b cookies.txt \
+  -H "Origin: http://localhost:3000"
+```
+
+---
+
+### GET /api/favorites/history
+
+Historia dodawania/usuwania ulubionych (dla adminów).
+
+**Autentykacja:** Wymagana (requireAdmin)
+
+**Parametry query:**
+| Pole | Typ | Wymagane | Opis |
+|------|-----|----------|------|
+| limit | int | NIE | Liczba wpisów (domyślnie 50) |
+| offset | int | NIE | Przesunięcie (domyślnie 0) |
+
+**Odpowiedź (sukces 200):**
+```json
+[
+  {
+    "id": 21,
+    "userId": "4947083a-cc9c-429f-9050-6a23cac87562",
+    "itemId": 5,
+    "action": "add",
+    "createdAt": "2026-01-20T10:30:00.000Z",
+    "userEmail": "jan.kowalski@example.com",
+    "userDisplayName": "Jan Kowalski",
+    "itemName": "Dell Latitude 5420",
+    "itemCategory": "laptop"
+  }
+]
+```
+
+Pole `action` przyjmuje wartości `add` lub `remove`. Wpisy posortowane od najnowszych.
+
+**Przykład:**
+```bash
+curl -X GET "http://localhost:3000/api/favorites/history?limit=50&offset=0" \
   -b cookies.txt
 ```
 
@@ -810,11 +1667,14 @@ Lista wszystkich użytkowników.
     "email": "jan.kowalski@example.com",
     "displayName": "Jan Kowalski",
     "isAdmin": true,
-    "lastLogin": "2026-01-20T09:17:19.607Z",
-    "createdAt": "2026-01-15T10:00:00.000Z"
+    "createdAt": "2026-01-15T10:00:00.000Z",
+    "lastLoginAt": "2026-01-20T09:17:19.607Z",
+    "lastActivity": "2026-01-20T11:42:03.115Z"
   }
 ]
 ```
+
+Pole `isAdmin` jest booleanem. Użytkownicy posortowani wg ostatniego logowania (najnowsi pierwsi).
 
 **Przykład:**
 ```bash
@@ -849,10 +1709,24 @@ Nadaj/odbierz uprawnienia admina.
 }
 ```
 
+**Odpowiedź (błąd 400 - isAdmin nie jest booleanem):**
+```json
+{
+  "error": "isAdmin must be a boolean"
+}
+```
+
 **Odpowiedź (błąd 400 - próba odebrania sobie uprawnień):**
 ```json
 {
   "error": "Cannot remove your own admin rights"
+}
+```
+
+**Odpowiedź (błąd 404):**
+```json
+{
+  "error": "User not found"
 }
 ```
 
@@ -864,6 +1738,7 @@ Nadaj/odbierz uprawnienia admina.
 ```bash
 curl -X PUT http://localhost:3000/api/users/abc123/admin \
   -b cookies.txt \
+  -H "Origin: http://localhost:3000" \
   -H "Content-Type: application/json" \
   -d '{"isAdmin":true}'
 ```
@@ -893,10 +1768,25 @@ Usuń użytkownika.
 }
 ```
 
+**Odpowiedź (błąd 404):**
+```json
+{
+  "error": "User not found"
+}
+```
+
+**Odpowiedź (błąd 500):**
+```json
+{
+  "error": "Failed to delete user"
+}
+```
+
 **Przykład:**
 ```bash
 curl -X DELETE http://localhost:3000/api/users/abc123 \
-  -b cookies.txt
+  -b cookies.txt \
+  -H "Origin: http://localhost:3000"
 ```
 
 ---
@@ -924,13 +1814,13 @@ Brak autentykacji.
 
 ```json
 {
-  "error": "Unauthorized"
+  "error": "Not authenticated"
 }
 ```
 
 **Przyczyny:**
 - Brak sesji (nie zalogowany)
-- Sesja wygasła (>24h)
+- Sesja wygasła (>7 dni bez żadnego requestu - cookie jest odświeżane przy każdym żądaniu)
 
 **Rozwiązanie:** Zaloguj się ponownie
 
@@ -940,13 +1830,24 @@ Brak uprawnień.
 
 ```json
 {
-  "error": "Forbidden"
+  "error": "Admin access required"
 }
 ```
 
 **Przyczyny:**
 - Endpoint wymaga uprawnień admina
 - Użytkownik nie jest adminem
+
+```json
+{
+  "error": "Invalid request origin"
+}
+```
+
+**Przyczyny:**
+- Ochrona CSRF: żądanie zmieniające stan (POST/PUT/DELETE/PATCH) z uwierzytelnioną sesją nie miało nagłówka `Origin`/`Referer` albo jego origin różni się od `BASE_URL`
+
+**Rozwiązanie:** W skryptach/curl dodaj nagłówek `-H "Origin: http://localhost:3000"` (origin musi odpowiadać `BASE_URL`)
 
 ### 404 Not Found
 
@@ -1022,6 +1923,7 @@ curl -X GET http://localhost:3000/api/items \
 # 1. Dodaj przedmiot z 2 zdjęciami
 curl -X POST http://localhost:3000/api/items \
   -b cookies.txt \
+  -H "Origin: http://localhost:3000" \
   -F "name=iPhone 12 Pro 128GB" \
   -F "category=phone" \
   -F "description=Stan bardzo dobry, bateria 85%" \
@@ -1034,6 +1936,7 @@ curl -X POST http://localhost:3000/api/items \
 # 2. Dodaj jeszcze jedno zdjęcie
 curl -X POST http://localhost:3000/api/items/5/images \
   -b cookies.txt \
+  -H "Origin: http://localhost:3000" \
   -F "images=@iphone_screen.jpg"
 ```
 
@@ -1043,10 +1946,11 @@ curl -X POST http://localhost:3000/api/items/5/images \
 # 1. Utwórz rezerwację
 curl -X POST http://localhost:3000/api/reservations \
   -b cookies.txt \
+  -H "Origin: http://localhost:3000" \
   -H "Content-Type: application/json" \
   -d '{"itemId":5}'
 
-# Odpowiedź: {"id":10,"status":"pending",...}
+# Odpowiedź: {"id":10,"status":"pending",...,"emailSent":true}
 # Email wysłany do admina
 ```
 
@@ -1059,7 +1963,8 @@ curl -X GET http://localhost:3000/api/reservations \
 
 # 2. Finalizuj rezerwację #10
 curl -X POST http://localhost:3000/api/reservations/10/complete \
-  -b cookies.txt
+  -b cookies.txt \
+  -H "Origin: http://localhost:3000"
 
 # Przedmiot zmienia status na "sold"
 ```
@@ -1068,7 +1973,7 @@ curl -X POST http://localhost:3000/api/reservations/10/complete \
 
 ```javascript
 // Login (redirect)
-// Potem w aplikacji:
+// Potem w aplikacji (przeglądarka wysyła nagłówek Origin automatycznie):
 
 // Pobierz katalog
 const items = await fetch('/api/items').then(r => r.json());
@@ -1095,4 +2000,4 @@ const newItem = await fetch('/api/items', {
 ---
 
 **Wersja API:** 1.0.0
-**Ostatnia aktualizacja:** 2026-01-20
+**Ostatnia aktualizacja:** 2026-07-08
