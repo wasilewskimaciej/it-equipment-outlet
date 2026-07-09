@@ -6,6 +6,11 @@
 A web application for an internal company store where employees browse and reserve
 surplus / used IT equipment, and administrators manage the catalogue and fulfil orders.
 
+The store fills a gap in the hardware lifecycle: equipment that is too good to be
+scrapped, yet too old, too slow or slightly flawed to be redeployed to another
+employee. Instead of being written off, it gets a second life with the company's
+own staff.
+
 > **About this project.** This is a real, working internal tool, generalized into a
 > self-contained portfolio build. All data in the screenshots is synthetic — there is
 > no real company data, catalogue or user information in this repository.
